@@ -1,5 +1,6 @@
-
+//#ifdef              判断某个宏是否被定义，若已定义，执行随后的语句
 #ifdef USERSPACE
+//条件编译#ifdef，预编译指令
 #include "openstate.h"
 #include <sys/socket.h>
 #include <time.h>
@@ -7,7 +8,7 @@
 #include <iostream>
 
 using namespace std;
-
+//得到当前时钟
 static unsigned long get_nsecs(void)
 {
     struct timespec ts;
@@ -18,10 +19,11 @@ static unsigned long get_nsecs(void)
 
 #define cursor_advance(_cursor, _len) \
   ({ void *_tmp = _cursor; _cursor += _len; _tmp; })
-#else
+#else  //与#if, #ifdef, #ifndef对应, 若这些条件不满足，则执行#else之后的语句
 #include <net/sock.h>
 #include <bcc/proto.h>
-#endif
+#endif    //#endif #if, #ifdef, #ifndef这些条件命令的结束标志.
+
 
 // #define abs(x) ((x)<0 ? -(x) : (x))
 
@@ -40,8 +42,9 @@ static unsigned long get_nsecs(void)
 	and containing "HTTP", "GET", "POST" ... as first bytes of payload
 	if the program is loaded as PROG_TYPE_SOCKET_FILTER
 	and attached to a socket
-	return  0 -> DROP the packet
+	return  0 ->丢掉这个包
 	return -1 -> KEEP the packet and return it to user space (userspace can read it from the socket_fd )
+	返回 -1，收下这个包，然后返回到用户空间
 */
 #ifdef USERSPACE
 int filter(uint8_t* skb, struct shared_struct* actual_struct) {
@@ -86,7 +89,7 @@ int filter(struct __sk_buff *skb) {
 	// state_idx.ip_src = 0;
 	// state_idx.ip_dst = 0;
 
-	struct XFSMTableKey xfsm_idx;
+	struct XFSMTableKey xfsm_idx;   //xfsm:扩展的有限状态自动机  openstate转发表：状态表和XFSM表
 	// xfsm_idx.state // Will be set anyway before XFSM lookup
 	xfsm_idx.l4_proto = 0;
 	xfsm_idx.ip_src = 0;
@@ -101,7 +104,7 @@ int filter(struct __sk_buff *skb) {
 	struct udp_t      *l4;
 
 	/* Headers parsing */
-
+	//包头解析
 	ethernet: {
 		ethernet = cursor_advance(cursor, sizeof(*ethernet));
 
@@ -145,7 +148,7 @@ int filter(struct __sk_buff *skb) {
 		goto EOP;
 	}
 
-	l4: {
+	l4: { //UDP
 		l4 = cursor_advance(cursor, sizeof(*l4));
 		#ifdef USERSPACE
 		// cout << "l4" << endl << flush;
@@ -185,10 +188,10 @@ int filter(struct __sk_buff *skb) {
 
 		//如果不存在该值，在HashMap中搜不到
 		//那么就把该条加入到Hash列表中
-		//
 		if (!xfsm_val) {
 			#ifndef USERSPACE
 			//XFSMTableLeaf值地定义方式
+			//在用户模式下，加入opentate动作表{state,action}
 			struct XFSMTableLeaf zero = {0, 0, {0,0,0,0,0,0}, 0, 0, 0, 0, false};
 			zero.actual_src_port = l4->sport;
 			zero.actual_dst_port = l4->dport;
@@ -200,6 +203,7 @@ int filter(struct __sk_buff *skb) {
 			// cout << "before allocation" << endl << flush;
 			//  void* calloc (size_t num, size_t size);
 			//calloc() 在内存中动态地分配 num 个长度为 size 的连续空间，并将每一个字节都初始化为 0
+			//在内核模式下，要加入hashmap
 			XFSMTableKey* xfsm_key_allocated = (XFSMTableKey*) calloc(1, sizeof(XFSMTableKey));
 			*xfsm_key_allocated = xfsm_idx;
 			XFSMTableLeaf* zero = (XFSMTableLeaf*) calloc(1, sizeof(XFSMTableLeaf));
@@ -213,7 +217,7 @@ int filter(struct __sk_buff *skb) {
 			// cout << "after allocation" << endl << flush;
 			#endif
 		}
-		//如果已经存在该key，就更新value
+		//如果hashmap已经存在该key，就更新value
 		if (xfsm_val != NULL) {
 			xfsm_val->num_packets += 1;
 
@@ -237,6 +241,7 @@ int filter(struct __sk_buff *skb) {
 			dport <<= FIXED_POINT_DIGITS;
 			protocol_identifier <<= FIXED_POINT_DIGITS;
 			total_length <<= FIXED_POINT_DIGITS;
+			//是数据包到达的时间差
 			delta <<= FIXED_POINT_DIGITS;
 			direction <<= FIXED_POINT_DIGITS;//转换成64位
 
@@ -257,6 +262,7 @@ int filter(struct __sk_buff *skb) {
 			int64_t avg_dev_direction = xfsm_val->features[5]/xfsm_val->num_packets;
 
 			#ifndef USERSPACE
+			//在内核空间执行
 			int zero_index = 0;
 			all_features.update(&zero_index, &sport);
 			int one_index = 1;
@@ -282,9 +288,10 @@ int filter(struct __sk_buff *skb) {
 			int eleven_index = 11;
 			all_features.update(&eleven_index, &avg_dev_direction);
 			#else
+			//储存feature值
 			int64_t all_features[12] = {sport, dport, protocol_identifier, total_length, delta, direction, avg_total_length, avg_delta, avg_direction, avg_dev_total_length, avg_dev_delta, avg_dev_direction};
 			#endif
-
+			//从current_node 0开始遍历
 			int current_node = 0;
 
 			#ifndef USERSPACE
@@ -296,10 +303,11 @@ int filter(struct __sk_buff *skb) {
 
 				int64_t* current_feature = feature.lookup(&current_node);
 				int64_t* current_threshold = threshold.lookup(&current_node);
-
+			
 				if (current_feature == NULL || current_threshold == NULL || current_left_child == NULL || current_right_child == NULL || *current_left_child == TREE_LEAF) {
 					break;
 				} else {
+					//根据feature与当前节点之间的关系对二叉树节点进行查找，
 					int64_t* real_feature_value = all_features.lookup((int*) current_feature);
 					if (real_feature_value != NULL) {
 						if (*real_feature_value <= *current_threshold) {
@@ -314,7 +322,7 @@ int filter(struct __sk_buff *skb) {
 			}
 
 			int64_t* correct_value = value.lookup(&current_node);
-
+			//如果valuez中
 			if (correct_value != NULL) {
 				xfsm_val->is_anomaly = (bool) correct_value;
 			}
@@ -328,7 +336,7 @@ int filter(struct __sk_buff *skb) {
 				int64_t current_feature = actual_struct->feature[current_node];
 				int64_t current_threshold = actual_struct->threshold[current_node];
 
-				if (current_left_child == TREE_LEAF) {
+				if (current_left_child == TREE_LEAF) {//到达叶子节点
 					break;
 				} else {
 					int64_t real_feature_value = all_features[current_feature];
@@ -344,7 +352,7 @@ int filter(struct __sk_buff *skb) {
 			xfsm_val->is_anomaly = (bool) correct_value;
 			#endif
 		}
-
+		//返回没有匹配的
 		return TC_CLS_NOMATCH;
 	}
 
